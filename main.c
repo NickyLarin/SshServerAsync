@@ -8,6 +8,8 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
+
 
 // Получение доступных адресов
 struct addrinfo* getAvailiableAddresses(char *port) {
@@ -45,6 +47,7 @@ int getSocket(struct addrinfo* addresses) {
         // Установка опции SO_REUSEADDR
         if (setsockopt(socketfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) == -1) {
             perror("setsockopt error");
+            continue;
         }
         // Привязка сокета к адресу
         if(bind(socketfd, address->ai_addr, address->ai_addrlen) == -1) {
@@ -82,10 +85,10 @@ int setNonBlock(int fd) {
 
 // Добавляем новое соединение в  epoll
 int acceptConnection(int epollfd, int socketfd) {
-    printf("Start accepting new conenction");
     struct sockaddr addr;
     socklen_t addrlen = sizeof(addr);
     int connectionfd = accept(socketfd, &addr, &addrlen);
+
     if (connectionfd == -1) {
         perror("acception connection error");
         return -1;
@@ -102,18 +105,24 @@ int acceptConnection(int epollfd, int socketfd) {
 }
 
 // Обрабатываем новое сообщение
-int handleRequest(int epollfd, int connectionfd) {
-    printf("Start handling request");
+int handleRequest(int connectionfd) {
     char buffer[1024];
     ssize_t count = read(connectionfd, buffer, sizeof(buffer));
-    if(count > 0) {
-        dprintf(connectionfd, "Hi, there!");
+    switch (count) {
+        case -1:
+            if (errno != EAGAIN)
+                perror("Reading data error");
+            break;
+        case 0:
+            printf("Client closed the connection\n");
+            break;
+        default:
+            dprintf(connectionfd, "Hi, There!\n");
     }
 }
 
 // Обрабатываем событие
 int handleEvent(struct epoll_event *event, int epollfd, int socketfd) {
-    printf("Start handling event");
     if ((event->events & EPOLLERR) || (event->events & EPOLLHUP)) {
         fprintf(stderr, "Handle event error or event hangup\n");
         close(event->data.fd);
@@ -122,7 +131,7 @@ int handleEvent(struct epoll_event *event, int epollfd, int socketfd) {
     if (socketfd == event->data.fd) {
         acceptConnection(epollfd, socketfd);
     } else {
-        handleRequest(epollfd, socketfd);
+        handleRequest(event->data.fd);
     }
 }
 
@@ -139,12 +148,11 @@ void handleSigInt(int signum) {
 ///////////////////////////////////////////////////////////////////////////////
 int main(int argc, char *argv[]) {
     // Обработка сигнала
-    /*
     struct sigaction act;
     memset(&act, 0, sizeof(act));
     act.sa_handler = handleSigInt;
     sigaction(SIGINT, &act, 0);
-    */
+
 
     // Проверка количества аргументов
     if (argc < 3) {
@@ -169,6 +177,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+
     // Начинаем слушать сокет
     if (listen(socketfd, SOMAXCONN) == -1) {
         perror("listen\n");
@@ -186,18 +195,18 @@ int main(int argc, char *argv[]) {
     if (addToEpoll(epollfd, socketfd) == -1)
         exit(EXIT_FAILURE);
 
-
     int maxEventNum = numberOfThreads;
-    struct epoll_event events[maxEventNum];
-    printf("I'm HERE!!");
+    struct epoll_event events[maxEventNum * sizeof(struct epoll_event)];
 
-    int timeout =-1;
+
+    int timeout = -1;
     while(!done) {
-        printf("Start waiting for epoll events");
+        printf("Start waiting for epoll events\n");
         int eventsNumber = epoll_wait(epollfd, events, maxEventNum, timeout);
-        if (eventsNumber == 0)
-            printf("No events");
+        if (!eventsNumber)
+            printf("No events\n");
         for (int i = 0; i < eventsNumber; i++) {
+            printf("Handling event %d of %d\n", i + 1, eventsNumber);
             handleEvent(events + i, epollfd, socketfd);
         }
     }
