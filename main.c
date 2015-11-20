@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <pthread.h>
 
 
 // Получение доступных адресов
@@ -191,12 +192,20 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+
+
     // Добавляем сокет в epoll
     if (addToEpoll(epollfd, socketfd) == -1)
         exit(EXIT_FAILURE);
 
     int maxEventNum = numberOfThreads;
-    struct epoll_event events[maxEventNum * sizeof(struct epoll_event)];
+    struct epoll_event events[maxEventNum];
+
+    // Создаём потоки
+    pthread_t threads[numberOfThreads];
+    for (int i = 0; i < sizeof(threads)/sizeof(pthread_t)) {
+        pthread_create(&threads[i], NULL, handleEvent, (void *)&wr_args);
+    }
 
 
     int timeout = -1;
