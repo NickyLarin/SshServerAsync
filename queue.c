@@ -15,6 +15,7 @@ int initQueue(struct Queue *queue, size_t sizeOfElement) {
     }
     memset(data, 0, sizeof(void *) * BEGIN_QUEUE_SIZE);
     queue->data = data;
+    queue->sizeOfElement = sizeOfElement;
     queue->maxSize = BEGIN_QUEUE_SIZE;
     queue->head = 0;
     queue->last = 0;
@@ -24,21 +25,29 @@ int initQueue(struct Queue *queue, size_t sizeOfElement) {
 // Добавляем элемент в очередь
 int pushQueue(struct Queue *queue, void *element) {
     if (queue->last == queue->maxSize) {
+        for (int i = 0; i < queue->maxSize; i++) {
+            printf("%p\n", queue->data[i]);
+        }
+        printf("!!!\n");
         queue->maxSize *= 2;
-        void **data = (void **)realloc(queue->data, queue->maxSize);
+        void **data = (void **)realloc(queue->data, queue->maxSize * sizeof(void *));
         if (data == NULL) {
             fprintf(stderr, "Error: increasing size of queue array\n");
             return -1;
         }
         queue->data = data;
+        for (int i = 0; i < queue->maxSize; i++) {
+            printf("%p\n", queue->data[i]);
+        }
     }
     void *newElement = (void *)malloc(queue->sizeOfElement);
-    memcpy(newElement, element, queue->sizeOfElement);
     if (newElement == NULL) {
         fprintf(stderr, "Error: allocating memory for new element in queue\n");
         return -1;
     }
+    memcpy(newElement, element, queue->sizeOfElement);
     queue->data[queue->last] = newElement;
+    //printf("%p\n", queue->data[queue->last]);
     queue->last += 1;
     return 0;
 }
@@ -66,6 +75,7 @@ int popQueue(struct Queue *queue, void *element) {
     if (element == NULL) {
         fprintf(stderr, "Error: queue get pointer to null");
     }
+    //printf("%p\n", queue->data[queue->head]);
     memcpy(element, queue->data[queue->head], queue->sizeOfElement);
     free(queue->data[queue->head]);
     queue->head += 1;
