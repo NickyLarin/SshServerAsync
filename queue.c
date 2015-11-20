@@ -9,7 +9,7 @@
 // Инициализируем очередь
 int initQueue(struct Queue *queue, size_t sizeOfElement) {
     void **data = (void **)malloc(sizeof(void *) * BEGIN_QUEUE_SIZE);
-    if (queue->data == NULL) {
+    if (data == NULL) {
         fprintf(stderr, "Error: initializing queue\n");
         return -1;
     }
@@ -19,6 +19,14 @@ int initQueue(struct Queue *queue, size_t sizeOfElement) {
     queue->maxSize = BEGIN_QUEUE_SIZE;
     queue->head = 0;
     queue->last = 0;
+    return 0;
+}
+
+// Проверка на пустоту
+int isEmptyQueue(struct Queue *queue) {
+    if (queue->head == queue->last) {
+        return 1;
+    }
     return 0;
 }
 

@@ -8,6 +8,7 @@
         size_t sizeOfElement;
     };
     int initQueue(struct Queue *queue, size_t sizeOfElement);
+    int isEmptyQueue(struct Queue *queue);
     int pushQueue(struct Queue *queue, void *element);
     void moveElementsInQueue(struct Queue *queue);
     int popQueue(struct Queue *queue, void *element);
