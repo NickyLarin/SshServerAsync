@@ -203,8 +203,14 @@ int main(int argc, char *argv[]) {
 
     // Создаём потоки
     pthread_t threads[numberOfThreads];
+    pthread_mutex_t eventQueueMutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t eventQueueCondition = PTHREAD_COND_INITIALIZER;
+
+    struct ThreadArgs threadArgs;
+    initThreadArgs(&threadArgs, &eventQueueMutex, &eventQueueCondition);
+
     for (int i = 0; i < sizeof(threads)/sizeof(pthread_t)) {
-        pthread_create(&threads[i], NULL, handleEvent, (void *)&wr_args);
+        pthread_create(&threads[i], NULL, handleEvent, (void *)&threadArgs);
     }
 
 
