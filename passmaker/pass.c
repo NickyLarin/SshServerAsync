@@ -3,11 +3,10 @@
 #include <stdlib.h>
 #include <signal.h>
 
+#include "pass_pair.h"
 #include "freadline.h"
 
 #define MAX_FILENAME_LEN 20
-#define MAX_LOGIN_LEN 13
-#define MAX_PASS_LEN 13
 
 // Глобальная переменная для завершения работы по сигналу
 volatile sig_atomic_t done = 0;
@@ -16,12 +15,6 @@ volatile sig_atomic_t done = 0;
 void handleSigInt(int signum) {
     done = 1;
 }
-
-// Структура для хранения пары логин-пароль в файле
-struct Data {
-    char login[MAX_LOGIN_LEN];
-    char pass[MAX_PASS_LEN];
-};
 
 int main(int argc, char *argv[]) {
     // Обработка сигнала
@@ -86,10 +79,10 @@ int main(int argc, char *argv[]) {
                 continue;
             }
             if(strcmp(pass, "") != 0) {
-                struct Data data;
+                struct PassPair data;
                 strcpy(data.login, login);
                 strcpy(data.pass, pass);
-                fwrite(&data, sizeof(struct Data), 1, ptr);
+                fwrite(&data, sizeof(struct PassPair), 1, ptr);
                 printf("Data writing done\n");
             }
         }
