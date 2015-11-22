@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <sys/epoll.h>
@@ -11,10 +10,28 @@
 #include <errno.h>
 #include <pthread.h>
 
+#include "common.h"
 #include "queue.h"
+
 
 // Глобальная переменная для завершения работы по сигналу
 volatile sig_atomic_t done = 0;
+
+// Глобальные переменные дескрипторов socketfd и epoll
+volatile int socketfd = -1;
+volatile int epollfd = -1;
+
+void setSocketFd(int _socketfd) {
+    if (socketfd == -1) {
+        socketfd = _socketfd;
+    }
+}
+
+void setEpollFd(int _epollfd) {
+    if (epollfd == -1) {
+        epollfd = _epollfd;
+    }
+}
 
 // Перехватчик сигнала
 void handleSigInt(int signum) {
@@ -36,10 +53,8 @@ struct Event {
 };
 
 // Инициализируем структуру события
-void initEvent(struct Event *event, struct epoll_event *epollEvent, int epollfd, int socketfd) {
+void initEvent(struct Event *event, struct epoll_event *epollEvent) {
     event->epollEvent = epollEvent;
-    event->epollfd = epollfd;
-    event->socketfd = socketfd;
 }
 
 // Инициализируем структуру аргументов
@@ -99,30 +114,8 @@ int getSocket(struct addrinfo* addresses) {
     return -1;
 }
 
-// Добавляем дескриптор в epoll
-int addToEpoll(int epollfd, int fd) {
-    struct epoll_event event;
-    event.data.fd = fd;
-    event.events = EPOLLIN | EPOLLET;
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event) == -1) {
-        perror("adding fd to epoll error\n");
-        return -1;
-    }
-    return 0;
-}
-
-// Делаем дескриптор не блокирующимся
-int setNonBlock(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK)) {
-        perror("Making descriptor non-block");
-        return -1;
-    }
-    return 0;
-}
-
-// Добавляем новое соединение в  epoll
-int acceptConnection(int epollfd, int socketfd) {
+// Добавляем новое соединение в epoll
+int acceptConnection() {
     struct sockaddr addr;
     socklen_t addrlen = sizeof(addr);
     int connectionfd = accept(socketfd, &addr, &addrlen);
@@ -132,7 +125,7 @@ int acceptConnection(int epollfd, int socketfd) {
         return -1;
     }
     if (setNonBlock(connectionfd) == -1) {
-        fprintf(stderr, "Making connection %d non-block error", connectionfd);
+        fprintf(stderr, "Making connection descriptor %d non-block error", connectionfd);
         return -1;
     }
     if (addToEpoll(epollfd, connectionfd) == -1) {
@@ -161,6 +154,7 @@ int handleRequest(int connectionfd) {
 
 // Обрабатываем событие
 void *handleEvent(void *args) {
+    // Получаем аргументы в новом потоке
     struct ThreadArgs *threadArgs = args;
     while (!done) {
         // Ожидание поступления события в очередь
@@ -168,20 +162,23 @@ void *handleEvent(void *args) {
         while (isEmptyQueue(threadArgs->queue)) {
             pthread_cond_wait(threadArgs->condition, threadArgs->mutex);
         }
-        struct Event event;
+        struct epoll_event event;
         popQueue(threadArgs->queue, &event);
         pthread_mutex_unlock(threadArgs->mutex);
 
         printf("Starting handle event\nThread: %d\n", (int)pthread_self());
-        if ((event.epollEvent->events & EPOLLERR) || (event.epollEvent->events & EPOLLHUP)) {
+        if ((event.events & EPOLLERR) || (event.events & EPOLLHUP)) {
             fprintf(stderr, "Handle event error or event hangup\n");
-            close(event.epollEvent->data.fd);
-            exit(EXIT_FAILURE);
+            close(event.data.fd);
+            continue;
         }
-        if (event.socketfd == event.epollEvent->data.fd) {
-            acceptConnection(event.epollfd, event.socketfd);
+        if (event.data.fd == socketfd) {
+            if (acceptConnection() == -1) {
+                fprintf(stderr, "Error: accepting new connection");
+                continue;
+            }
         } else {
-            handleRequest(event.epollEvent->data.fd);
+            handleRequest(event.data.fd);
         }
     }
 }
@@ -217,11 +214,12 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
 
     // Получаем дескриптор сокета
-    int socketfd = getSocket(addresses);
-    if (socketfd == -1) {
+    int _socketfd = getSocket(addresses);
+    if (_socketfd == -1) {
         exit(EXIT_FAILURE);
     }
 
+    setSocketFd(_socketfd);
 
     // Начинаем слушать сокет
     if (listen(socketfd, SOMAXCONN) == -1) {
@@ -229,29 +227,15 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    // Создаём epoll
-    int epollfd = epoll_create1(0);
-    if (epollfd == -1) {
-        perror("epoll_create error\n");
-        exit(EXIT_FAILURE);
-    }
-
-
-
-    // Добавляем сокет в epoll
-    if (addToEpoll(epollfd, socketfd) == -1)
-        exit(EXIT_FAILURE);
-
-    int maxEventNum = numberOfThreads;
-    struct epoll_event events[maxEventNum];
 
     // Создаём потоки
     pthread_t threads[numberOfThreads];
     pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
 
+    // Создаём очередь
     struct Queue queue;
-    initQueue(&queue, sizeof(struct Event));
+    initQueue(&queue, sizeof(struct epoll_event));
 
     struct ThreadArgs threadArgs;
     initThreadArgs(&threadArgs, &queue, &mutex, &condition);
@@ -260,6 +244,21 @@ int main(int argc, char *argv[]) {
         pthread_create(&threads[i], NULL, handleEvent, (void *)&threadArgs);
     }
 
+    // Создаём epoll
+    int _epollfd = epoll_create1(0);
+    if (_epollfd == -1) {
+        perror("epoll_create error\n");
+        exit(EXIT_FAILURE);
+    }
+
+    setEpollFd(_epollfd);
+
+    // Добавляем сокет в epoll
+    if (addToEpoll(epollfd, socketfd) == -1)
+        exit(EXIT_FAILURE);
+
+    int maxEventNum = numberOfThreads;
+    struct epoll_event events[maxEventNum];
 
     int timeout = -1;
     printf("Main thread: %d\n", (int)pthread_self());
@@ -270,19 +269,17 @@ int main(int argc, char *argv[]) {
             printf("No events\n");
         for (int i = 0; i < eventsNumber; i++) {
             printf("Handling event %d of %d\n", i + 1, eventsNumber);
-            struct Event event;
-            initEvent(&event, events + i, epollfd, socketfd);
             pthread_mutex_lock(&mutex);
-            pushQueue(&queue, &event);
+            pushQueue(&queue, &events[i]);
             pthread_cond_signal(&condition);
             pthread_mutex_unlock(&mutex);
-            // handleEvent(events + i, epollfd, socketfd); //
         }
     }
 
     destroyQueue(&queue);
     close(socketfd);
     close(epollfd);
+    printf("DONE!!!");
 
     return 0;
 }
