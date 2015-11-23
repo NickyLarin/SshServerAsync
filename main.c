@@ -16,11 +16,13 @@
 
 #define MAX_CONNECTIONS 256
 #define CONNECTION_TIMEOUT 300
+#define MAX_LOGIN_ATTEMPTS 3
 
-#define NOT_AUTHENTICATED 0
-#define LOGIN_REQUESTED 1
-#define PASSWORD_REQUESTED 2
-#define AUTHENTICATED 3
+#define LOGIN_REQUEST 0
+#define LOGIN_CHECK 1
+#define PASSWORD_REQUEST 2
+#define PASSWORD_CHECK 3
+#define AUTHENTICATED 4
 
 // Структура содержащая информацию о соединении
 struct Connection {
@@ -180,7 +182,7 @@ int acceptConnection() {
         return -1;
     }
     addConnectionIntoList(connectionfd);
-    return 0;
+    return connectionfd;
 }
 
 
@@ -239,18 +241,20 @@ int sendMsg(int connectionfd, char *msg) {
 struct PassPair *getPair(char *login) {
     char *result = cleanString(login);
     for (int i = 0; i < lengthPassPairs; i++) {
-        if (strncmp(passPairs[i].login, result, strlen(result)) == 0) {
+        printf("Login in file: %s\n", passPairs[i].login);
+        if (strncmp(passPairs[i].login, result, strlen(passPairs[i].login)) == 0) {
             return &passPairs[i];
         }
     }
+    fprintf(stderr, "Wrong login: %s\n", result);
     return NULL;
 }
 
 // Проверяем пароль
 int checkPassword(struct PassPair *pair, char *password) {
     char *result = cleanString(password);
-    if (strncmp(pair->pass, result, strlen(result)) != 0) {
-        fprintf(stderr, "Wrong password for %s, Thread: %d\n", pair->login, pthread_self());
+    if (strncmp(pair->pass, result, strlen(pair->pass)) != 0) {
+        fprintf(stderr, "Wrong password: %s\n", result);
         return -1;
     }
     return 0;
@@ -260,35 +264,39 @@ int checkPassword(struct PassPair *pair, char *password) {
 int passAuthentication(struct Connection *connection) {
     printf("Thread: %d get here with: %d auth: %d\n", pthread_self(), connection->connectionfd, connection->authentication);
     switch(connection->authentication) {
-        case NOT_AUTHENTICATED: {
+        case LOGIN_REQUEST: {
             if (sendMsg(connection->connectionfd, "Enter login: ") == -1) {
                 fprintf(stderr, "Error: sending login msg\n");
                 return -1;
             }
-            connection->authentication = LOGIN_REQUESTED;
+            connection->authentication = LOGIN_CHECK;
             break;
         }
-        case LOGIN_REQUESTED: {
+        case LOGIN_CHECK: {
             char *login = NULL;
             int size = readNonBlock(connection->connectionfd, &login, 0);
-            connection->pair = getPair(login);  // -1 чтобы не сравнивать \0 или \r в конце строки
+            connection->pair = getPair(login);
             if (connection->pair == NULL) {
                 if(sendMsg(connection->connectionfd, "Wrong login, try again\n") == -1) {
                     fprintf(stderr, "Error: sending wrong login msg\n");
                     return -1;
                 }
-                connection->authentication = NOT_AUTHENTICATED;
+                connection->authentication = LOGIN_REQUEST;
                 break;
             }
             free(login);
+            connection->authentication = PASSWORD_REQUEST;
+            break;
+        }
+        case PASSWORD_REQUEST: {
             if (sendMsg(connection->connectionfd, "Enter password: ") == -1) {
                 fprintf(stderr, "Error: sending password msg\n");
                 return -1;
             }
-            connection->authentication = PASSWORD_REQUESTED;
+            connection->authentication = PASSWORD_CHECK;
             break;
         }
-        case PASSWORD_REQUESTED: {
+        case PASSWORD_CHECK: {
             char *password = NULL;
             int size = readNonBlock(connection->connectionfd, &password, 0);
             if (checkPassword(connection->pair, password) == -1) {
@@ -296,15 +304,12 @@ int passAuthentication(struct Connection *connection) {
                     fprintf(stderr, "Error: sending wrong password msg\n");
                     return -1;
                 }
-                connection->authentication = LOGIN_REQUESTED;
+                connection->authentication = PASSWORD_REQUEST;
                 break;
             }
             free(password);
-            intmax_t count = 0;
-            char message[] = "Authentication proceeded!\n";
-            count = write(connection->connectionfd, message, sizeof(message)/sizeof(char));
-            if (count < sizeof(message)/sizeof(char) && (errno & EAGAIN)) {
-                perror("writing to connectionfd");
+            if (sendMsg(connection->connectionfd, "Authentication complete!") == -1) {
+                fprintf(stderr, "Error: sending password msg\n");
                 return -1;
             }
             connection->authentication = AUTHENTICATED;
@@ -347,17 +352,21 @@ void *worker(void *args) {
         }
         struct epoll_event event;
         popQueue(workerArgs->queue, &event);
-        //printf("Got event: %d thread: %d\n", event.data.fd, pthread_self());
         pthread_mutex_unlock(workerArgs->mutex);
-        //printf("Starting handle event. Thread: %d\n", (int)pthread_self());
         if (event.data.fd == socketfd) {
-            if (acceptConnection() == -1) {
+            int connectionfd = acceptConnection();
+            if (connectionfd == -1) {
                 fprintf(stderr, "Error: accepting new connection\n");
                 continue;
             }
+            if (handleEvent(connectionfd) == -1) {
+                fprintf(stderr, "Error: handling new connection, after accepting\n");
+                continue;
+            };
         } else {
-            if (handleEvent(event.data.fd)) {
-
+            if (handleEvent(event.data.fd) == -1) {
+                fprintf(stderr, "Error: handling event\n");
+                continue;
             }
         }
     }
