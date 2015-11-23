@@ -9,12 +9,14 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <time.h>
 
 #include "common.h"
 #include "queue.h"
 
 
 #define MAX_CONNECTIONS 256
+#define CONNECTION_TIMEOUT 300
 
 #define CONN_FD_TYPE 1
 #define PTM_FD_TYPE 2
@@ -25,33 +27,26 @@ struct Connection {
     int connectionfd;
     int ptm;
     int authentication;  // 0 - Новое соединение 1 - Запрошен логин 2 - Логин проверен, запрошен пароль 3 - Пароль проверен
+    time_t lastRequest;
 };
 
 // Структура для передачи аргументов в функции при создании потока
-struct ThreadArgs {
+struct WorkerArgs {
     struct Queue *queue;
     pthread_mutex_t *mutex;
     pthread_cond_t *condition;
 };
 
-// Структура для хранения в очереди информации о событии
-struct Event {
-    struct epoll_event *epollEvent;
-    int epollfd;
-    int socketfd;
-};
-
 // Глобальная переменная для завершения работы по сигналу
 volatile sig_atomic_t done = 0;
-
-// Глобальные переменные дескрипторов socketfd и epoll
-int socketfd = -1;
-int epollfd = -1;
 
 // Глобальные переменные для струтуры со списком дескрипторов соединений и мьютексом для синхронизации доступа к ним
 struct Connection connections[MAX_CONNECTIONS];
 pthread_mutex_t connectionsMutex;
 
+// Глобальные переменные дескрипторов socketfd и epoll
+int socketfd = -1;
+int epollfd = -1;
 
 void setSocketFd(int _socketfd) {
     if (socketfd == -1) {
@@ -70,16 +65,13 @@ void handleSigInt(int signum) {
     done = 1;
 }
 
-// Инициализируем структуру события
-void initEvent(struct Event *event, struct epoll_event *epollEvent) {
-    event->epollEvent = epollEvent;
-}
 
 // Инициализируем структуру аргументов
-void initThreadArgs(struct ThreadArgs *threadArgs, struct Queue *queue, pthread_mutex_t *mutex, pthread_cond_t *condition) {
-    threadArgs->queue = queue;
-    threadArgs->mutex = mutex;
-    threadArgs->condition = condition;
+void initWorkerArgs(struct WorkerArgs *workerArgs, struct Queue *queue, pthread_mutex_t *mutex,
+                    pthread_cond_t *condition) {
+    workerArgs->queue = queue;
+    workerArgs->mutex = mutex;
+    workerArgs->condition = condition;
 }
 
 // Получение доступных адресов
@@ -134,12 +126,13 @@ int getSocket(struct addrinfo* addresses) {
 
 
 // Добавляем соединение в список
-void addToConnectionsList(int connectionfd) {
+void addConnectionIntoList(int connectionfd) {
     struct Connection connection;
     memset(&connection, 0, sizeof(struct Connection));
     connection.connectionfd = connectionfd;
     connection.ptm = -1;
     connection.authentication = 0;
+    connection.lastRequest = time(NULL);
     pthread_mutex_lock(&connectionsMutex);
     for (int i = 0; i < sizeof(connections)/sizeof(connections[0]); i++) {
         if (connections[i].connectionfd == 0) {
@@ -150,7 +143,16 @@ void addToConnectionsList(int connectionfd) {
 }
 
 // Удаляем соединения из списка
-
+void removeConnectionFromList(struct Connection *connection) {
+    pthread_mutex_lock(&connectionsMutex);
+    for (int i = 0; i < sizeof(connections)/sizeof(connections[0]); i++) {
+        if (connection == &connections[i]) {
+            memset(&connections[i], 0, sizeof(connections[i]));
+            break;
+        }
+    }
+    pthread_mutex_unlock(&connectionsMutex);
+}
 
 // Добавляем новое соединение в epoll
 int acceptConnection() {
@@ -170,23 +172,57 @@ int acceptConnection() {
         fprintf(stderr, "Adding connection to epoll");
         return -1;
     }
+    addConnectionIntoList(connectionfd);
     return 0;
 }
 
+
+// Закрываем соединение
+int closeConnection(struct Connection *connection) {
+    if (close(connection->connectionfd) == -1) {
+        perror("closing connection");
+        return -1;
+    }
+    removeConnectionFromList(connection);
+}
+
+// Проверяем не наступил ли таймаут соединения
+// Обновляем если не наступил
+// Возвращаем 0, если таймаут не наступил и был обновлен
+// Возвращаем 1, если таймаут наступил
+int checkConnectionTimeout(struct Connection *connection) {
+    if (difftime(time(NULL), connection->lastRequest) > CONNECTION_TIMEOUT) {
+        return 1;
+    } else {
+        connection->lastRequest = time(NULL);
+        return 0;
+    }
+}
+
+// Ищем и соединение в массиве
+struct Connection *getConnection(int fd) {
+    struct Connection *result = NULL;
+    pthread_mutex_lock(&connectionsMutex);
+    for (int i = 0; i < sizeof(connections)/sizeof(connections[0]); i++) {
+        if (fd == connections[i].connectionfd || fd == connections[i].ptm)
+            result = &connections[i];
+    }
+    pthread_mutex_unlock(&connectionsMutex);
+    return result;
+}
+
 // Обрабатываем новое сообщение
-int handleRequest(int connectionfd) {
-    char buffer[1024];
-    ssize_t count = read(connectionfd, buffer, sizeof(buffer));
-    switch (count) {
-        case -1:
-            if (errno != EAGAIN)
-                perror("Reading data error");
-            break;
-        case 0:
-            printf("Client closed the connection\n");
-            break;
-        default:
-            dprintf(connectionfd, "Hi, There!\n");
+int handleEvent(int fd) {
+    struct Connection *connection = getConnection(fd);
+    if (connection == NULL) {
+        fprintf(stderr, "Error: connection from epoll wasn't found in list\n");
+        return -1;
+    }
+    if (checkConnectionTimeout(connection) == 1) {
+        if (closeConnection(connection) == -1) {
+            fprintf(stderr, "Error: closing connection for timeout\n");
+            return -1;
+        }
     }
 }
 
@@ -194,27 +230,30 @@ int handleRequest(int connectionfd) {
 
 
 // Обрабатываем событие
-void *handleEvent(void *args) {
+void *worker(void *args) {
     // Получаем аргументы в новом потоке
-    struct ThreadArgs *threadArgs = args;
+    struct WorkerArgs *workerArgs = args;
     while (!done) {
         // Ожидание поступления события в очередь
-        pthread_mutex_lock(threadArgs->mutex);
-        while (isEmptyQueue(threadArgs->queue)) {
-            pthread_cond_wait(threadArgs->condition, threadArgs->mutex);
+        pthread_mutex_lock(workerArgs->mutex);
+        while (isEmptyQueue(workerArgs->queue)) {
+            pthread_cond_wait(workerArgs->condition, workerArgs->mutex);
         }
         struct epoll_event event;
-        popQueue(threadArgs->queue, &event);
-        pthread_mutex_unlock(threadArgs->mutex);
+        popQueue(workerArgs->queue, &event);
+        pthread_mutex_unlock(workerArgs->mutex);
 
 
         printf("Starting handle event. Thread: %d\n", (int)pthread_self());
         if (event.data.fd == socketfd) {
-            if (acceptConnection()) {
-                fprintf(stderr, "Error: accepting new connection");
+            if (acceptConnection() == -1) {
+                fprintf(stderr, "Error: accepting new connection\n");
                 continue;
             }
         } else {
+            if (handleEvent(event.data.fd)) {
+
+            }
         }
     }
 }
@@ -239,7 +278,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Количество потоков - 1й параметр запуска
-    int numberOfThreads = atoi(argv[1]);
+    int numberOfWorkers = atoi(argv[1]);
 
     // Порт - 2й параметр запуска
     char port[4];
@@ -268,7 +307,7 @@ int main(int argc, char *argv[]) {
 
 
     // Создаём потоки
-    pthread_t threads[numberOfThreads];
+    pthread_t workers[numberOfWorkers];
     pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
 
@@ -276,11 +315,11 @@ int main(int argc, char *argv[]) {
     struct Queue queue;
     initQueue(&queue, sizeof(struct epoll_event));
 
-    struct ThreadArgs threadArgs;
-    initThreadArgs(&threadArgs, &queue, &mutex, &condition);
+    struct WorkerArgs workerArgs;
+    initWorkerArgs(&workerArgs, &queue, &mutex, &condition);
 
-    for (int i = 0; i < sizeof(threads)/sizeof(pthread_t); i++) {
-        pthread_create(&threads[i], NULL, handleEvent, (void *)&threadArgs);
+    for (int i = 0; i < sizeof(workers) / sizeof(pthread_t); i++) {
+        pthread_create(&workers[i], NULL, worker, (void *) &workerArgs);
     }
 
     // Создаём epoll
@@ -296,7 +335,7 @@ int main(int argc, char *argv[]) {
     if (addToEpoll(epollfd, socketfd) == -1)
         exit(EXIT_FAILURE);
 
-    int maxEventNum = numberOfThreads;
+    int maxEventNum = numberOfWorkers;
     struct epoll_event events[maxEventNum];
 
     int timeout = -1;
