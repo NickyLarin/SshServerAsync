@@ -92,10 +92,33 @@ int readNonBlock(int fd, char **buffer, size_t beginSize) {
         default:
             break;
     }
-    if ((*buffer)[strlen(*buffer)-1] == '\n') {
-        (*buffer)[strlen(*buffer)-1] = '\0';
-        size = strlen(*buffer);
-        *buffer = (char *)realloc(*buffer, size * sizeof(char));
-    }
+    size = strlen(*buffer);
+    *buffer = (char *)realloc(*buffer, size * sizeof(char));
     return size;
+}
+
+// Очистить строку от символов \n
+char *cleanString(char *string) {
+    int length = strlen(string);
+    char *tmp = (char *)malloc(length);
+    memcpy(tmp, string, length);
+    int count = 0;
+    for (int i = 0; i < length; i++) {
+        if (tmp[i] == '\n' || tmp[i] == '\r')
+            count++;
+        else
+            break;
+    }
+    tmp += count;
+    length = strlen(tmp);
+    count = 0;
+    for (int i = 1; i < length; i++) {
+        if (tmp[length-i] == '\n' || tmp[length-i] == '\r')
+            count++;
+        else
+            break;
+    }
+    length-=count;
+    tmp[length] = '\0';
+    return tmp;
 }

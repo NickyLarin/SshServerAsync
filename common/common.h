@@ -8,5 +8,6 @@
     int changeEpoll(int epollfd, int fd, uint32_t flags);
     int writeNonBlock(int fd, char *string);
     int readNonBlock(int fd, char **buffer, size_t beginSize);
+    char *cleanString(char *string);
     #define COMMON_H
 #endif //COMMON_H

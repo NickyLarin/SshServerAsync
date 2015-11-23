@@ -236,10 +236,10 @@ int sendMsg(int connectionfd, char *msg) {
 }
 
 // Получаем пару логин-пароль по логину
-struct PassPair *getPair(char *login, int size) {
-    printf("%s\n", login);
+struct PassPair *getPair(char *login) {
+    char *result = cleanString(login);
     for (int i = 0; i < lengthPassPairs; i++) {
-        if (strncmp(passPairs[i].login, login, size) == 0) {
+        if (strncmp(passPairs[i].login, result, strlen(result)) == 0) {
             return &passPairs[i];
         }
     }
@@ -248,7 +248,8 @@ struct PassPair *getPair(char *login, int size) {
 
 // Проверяем пароль
 int checkPassword(struct PassPair *pair, char *password) {
-    if (strncmp(pair->pass, password, strlen(pair->pass-1)) != 0) {
+    char *result = cleanString(password);
+    if (strncmp(pair->pass, result, strlen(result)) != 0) {
         fprintf(stderr, "Wrong password for %s, Thread: %d\n", pair->login, pthread_self());
         return -1;
     }
@@ -270,7 +271,7 @@ int passAuthentication(struct Connection *connection) {
         case LOGIN_REQUESTED: {
             char *login = NULL;
             int size = readNonBlock(connection->connectionfd, &login, 0);
-            connection->pair = getPair(login, size-1);  // -1 чтобы не сравнивать \0 или \r в конце строки
+            connection->pair = getPair(login);  // -1 чтобы не сравнивать \0 или \r в конце строки
             if (connection->pair == NULL) {
                 if(sendMsg(connection->connectionfd, "Wrong login, try again\n") == -1) {
                     fprintf(stderr, "Error: sending wrong login msg\n");
