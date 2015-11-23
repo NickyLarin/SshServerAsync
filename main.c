@@ -16,7 +16,7 @@
 
 
 #define MAX_CONNECTIONS 256
-#define CONNECTION_TIMEOUT 300
+#define CONNECTION_TIMEOUT 10
 
 #define CONN_FD_TYPE 1
 #define PTM_FD_TYPE 2
@@ -142,6 +142,7 @@ void addConnectionIntoList(int connectionfd) {
     for (int i = 0; i < sizeof(connections)/sizeof(connections[0]); i++) {
         if (connections[i].connectionfd == 0) {
             connections[i] = connection;
+            break;
         }
     }
     pthread_mutex_unlock(&connectionsMutex);
@@ -323,7 +324,7 @@ void *worker(void *args) {
         pthread_mutex_unlock(workerArgs->mutex);
 
 
-        printf("Starting handle event. Thread: %d\n", (int)pthread_self());
+        //printf("Starting handle event. Thread: %d\n", (int)pthread_self());
         if (event.data.fd == socketfd) {
             if (acceptConnection() == -1) {
                 fprintf(stderr, "Error: accepting new connection\n");
