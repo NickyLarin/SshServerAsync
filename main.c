@@ -22,6 +22,11 @@
 #define PTM_FD_TYPE 2
 #define OTHER_FD_TYPE 3
 
+#define NOT_AUTHENTICATED 0
+#define LOGIN_REQUESTED 1
+#define PASSWORD_REQUESTED 2
+#define AUTHENTICATED 3
+
 // Структура содержащая информацию о соединении
 struct Connection {
     int connectionfd;
@@ -211,6 +216,75 @@ struct Connection *getConnection(int fd) {
     return result;
 }
 
+// Проверяем аутентификацию
+int checkAuthentication(struct Connection *connection) {
+    if (connection->authentication < AUTHENTICATED) {
+        return 1;
+    }
+    return 0;
+}
+
+// Пройти аутентификацию
+int passAuthentication(struct Connection *connection) {
+    switch(connection->authentication) {
+        case NOT_AUTHENTICATED: {
+            char message[] = "Login: ";
+            int count = write(connection->connectionfd, message, sizeof(message)/sizeof(char));
+            if (count < sizeof(message)/sizeof(char) && (errno & EAGAIN)) {
+                perror("writing to connectionfd");
+                return -1;
+            }
+            connection->authentication++;
+            break;
+        }
+        case LOGIN_REQUESTED: {
+            int size = 128;
+            char *buffer = malloc(size * sizeof(char));
+            int count = 0;
+            do {
+                count += read(connection->connectionfd, buffer, size);
+                if (count == size) {
+                    size *= 2;
+                    buffer = realloc(buffer, size * sizeof(char));
+                }
+            } while (count > 0 && (errno & ~EAGAIN));
+            printf("SERVER RECEIVE LOGIN: %s\n", buffer);
+
+            free(buffer);
+            char message[] = "Password: ";
+            count = write(connection->connectionfd, message, sizeof(message)/sizeof(char));
+            if (count < sizeof(message)/sizeof(char) && (errno & EAGAIN)) {
+                perror("writing to connectionfd");
+                return -1;
+            }
+            connection->authentication++;
+            break;
+        }
+        case PASSWORD_REQUESTED: {
+            int size = 128;
+            char *buffer = malloc(size * sizeof(char));
+            int count = 0;
+            do {
+                count += read(connection->connectionfd, buffer, size);
+                if (count == size) {
+                    size *= 2;
+                    buffer = realloc(buffer, size * sizeof(char));
+                }
+            } while (count > 0 && (errno & ~EAGAIN));
+            printf("SERVER RECEIVE PASS: %s\n", buffer);
+            free(buffer);
+            char message[] = "Authentication proceeded!\n";
+            count = write(connection->connectionfd, message, sizeof(message)/sizeof(char));
+            if (count < sizeof(message)/sizeof(char) && (errno & EAGAIN)) {
+                perror("writing to connectionfd");
+                return -1;
+            }
+            connection->authentication++;
+            break;
+        }
+    }
+}
+
 // Обрабатываем новое сообщение
 int handleEvent(int fd) {
     struct Connection *connection = getConnection(fd);
@@ -223,6 +297,11 @@ int handleEvent(int fd) {
             fprintf(stderr, "Error: closing connection for timeout\n");
             return -1;
         }
+    }
+    if (checkAuthentication(connection)) {
+        passAuthentication(connection);
+    } else {
+
     }
 }
 
