@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "common.h"
 
@@ -46,17 +47,41 @@ int writeNonBlock(int fd, char *string) {
 }
 
 // Чтение из неблокирующегося дескриптора
-int readNonBlock(int fd, char *string) {
-    int size = READ_BUFFER_SIZE;
-    char *buffer = (char *)malloc(size * sizeof(char));
-    int count = 0;
+int readNonBlock(int fd, char **buffer, size_t beginSize) {
+    size_t size = beginSize;
+    if (size < 1)
+        size = READ_BUFFER_SIZE;
+    if (*buffer == NULL) {
+        *buffer = (char *)malloc(size * sizeof(char));
+    }
+    intmax_t count = 0;
+    int legth = 0;
     do {
-        count = read(fd, buffer, READ_BUFFER_SIZE);
-        if (count + READ_BUFFER_SIZE <= size) {
-            size *= 4;
-            buffer = (char *) realloc(buffer, size * sizeof(char));
+        count = read(fd, ((*buffer) + legth), READ_BUFFER_SIZE);
+        legth += count;
+        if (legth == size) {
+            size *= 2;
+            *buffer = realloc(*buffer, size * sizeof(char));
         }
-    } while (count != 0 && (errno & EAGAIN));
-    string = buffer;
-    return 0;
+    } while (count > 0);
+    switch(count) {
+        case -1: {
+            if (errno != EAGAIN) {
+                perror("reading non-block error");
+                return -1;
+            }
+            break;
+        }
+        case 0: {
+            printf("Connection have been closed");
+        }
+        default:
+            break;
+    }
+    if ((*buffer)[strlen(*buffer)-1] == '\n') {
+        (*buffer)[strlen(*buffer)-1] = '\0';
+        size = strlen(*buffer);
+        *buffer = (char *)realloc(*buffer, size * sizeof(char));
+    }
+    return size;
 }

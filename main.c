@@ -16,7 +16,7 @@
 
 
 #define MAX_CONNECTIONS 256
-#define CONNECTION_TIMEOUT 10
+#define CONNECTION_TIMEOUT 300
 
 #define CONN_FD_TYPE 1
 #define PTM_FD_TYPE 2
@@ -239,19 +239,12 @@ int passAuthentication(struct Connection *connection) {
             break;
         }
         case LOGIN_REQUESTED: {
-            int size = 128;
-            char *buffer = malloc(size * sizeof(char));
-            int count = 0;
-            do {
-                count += read(connection->connectionfd, buffer, size);
-                if (count == size) {
-                    size *= 2;
-                    buffer = realloc(buffer, size * sizeof(char));
-                }
-            } while (count > 0 && (errno & ~EAGAIN));
-            printf("SERVER RECEIVE LOGIN: %s\n", buffer);
+            char *login = NULL;
+            int size = readNonBlock(connection->connectionfd, &login, 0);
+            printf("SERVER RECEIVE LOGIN: %s\nSTRLEN: %d\nSIZE: %d\n", login, strlen(login), size);
+            free(login);
 
-            free(buffer);
+            int count = 0;
             char message[] = "Password: ";
             count = write(connection->connectionfd, message, sizeof(message)/sizeof(char));
             if (count < sizeof(message)/sizeof(char) && (errno & EAGAIN)) {
@@ -262,18 +255,12 @@ int passAuthentication(struct Connection *connection) {
             break;
         }
         case PASSWORD_REQUESTED: {
-            int size = 128;
-            char *buffer = malloc(size * sizeof(char));
+            char *password = NULL;
+            int size = readNonBlock(connection->connectionfd, &password, 0);
+            printf("SERVER RECEIVE PASSWORD: %s\nSTRLEN: %d\nSIZE: %d\n", password, strlen(password), size);
+            free(password);
+
             int count = 0;
-            do {
-                count += read(connection->connectionfd, buffer, size);
-                if (count == size) {
-                    size *= 2;
-                    buffer = realloc(buffer, size * sizeof(char));
-                }
-            } while (count > 0 && (errno & ~EAGAIN));
-            printf("SERVER RECEIVE PASS: %s\n", buffer);
-            free(buffer);
             char message[] = "Authentication proceeded!\n";
             count = write(connection->connectionfd, message, sizeof(message)/sizeof(char));
             if (count < sizeof(message)/sizeof(char) && (errno & EAGAIN)) {
@@ -364,7 +351,7 @@ int main(int argc, char *argv[]) {
     char port[4];
     strcpy(port, argv[2]);
 
-    // Инициализация fdLists
+    // Инициализация connections
     memset(connections, 0, sizeof(connections));
 
     struct addrinfo* addresses = getAvailiableAddresses(port);
