@@ -21,7 +21,7 @@ int setNonBlock(int fd) {
 int addToEpoll(int epollfd, int fd) {
     struct epoll_event event;
     event.data.fd = fd;
-    event.events = EPOLLIN | EPOLLET;
+    event.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event) == -1) {
         perror("adding fd to epoll error\n");
         return -1;

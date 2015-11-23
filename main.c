@@ -14,12 +14,44 @@
 #include "queue.h"
 
 
+#define MAX_CONNECTIONS 256
+
+#define CONN_FD_TYPE 1
+#define PTM_FD_TYPE 2
+#define OTHER_FD_TYPE 3
+
+// Структура содержащая информацию о соединении
+struct Connection {
+    int connectionfd;
+    int ptm;
+    int authentication;  // 0 - Новое соединение 1 - Запрошен логин 2 - Логин проверен, запрошен пароль 3 - Пароль проверен
+};
+
+// Структура для передачи аргументов в функции при создании потока
+struct ThreadArgs {
+    struct Queue *queue;
+    pthread_mutex_t *mutex;
+    pthread_cond_t *condition;
+};
+
+// Структура для хранения в очереди информации о событии
+struct Event {
+    struct epoll_event *epollEvent;
+    int epollfd;
+    int socketfd;
+};
+
 // Глобальная переменная для завершения работы по сигналу
 volatile sig_atomic_t done = 0;
 
 // Глобальные переменные дескрипторов socketfd и epoll
-volatile int socketfd = -1;
-volatile int epollfd = -1;
+int socketfd = -1;
+int epollfd = -1;
+
+// Глобальные переменные для струтуры со списком дескрипторов соединений и мьютексом для синхронизации доступа к ним
+struct Connection connections[MAX_CONNECTIONS];
+pthread_mutex_t connectionsMutex;
+
 
 void setSocketFd(int _socketfd) {
     if (socketfd == -1) {
@@ -37,20 +69,6 @@ void setEpollFd(int _epollfd) {
 void handleSigInt(int signum) {
     done = 1;
 }
-
-// Структура для передачи аргументов в функции при создании потока
-struct ThreadArgs {
-    struct Queue *queue;
-    pthread_mutex_t *mutex;
-    pthread_cond_t *condition;
-};
-
-// Структура для хранения в очереди информации о событии
-struct Event {
-    struct epoll_event *epollEvent;
-    int epollfd;
-    int socketfd;
-};
 
 // Инициализируем структуру события
 void initEvent(struct Event *event, struct epoll_event *epollEvent) {
@@ -114,6 +132,26 @@ int getSocket(struct addrinfo* addresses) {
     return -1;
 }
 
+
+// Добавляем соединение в список
+void addToConnectionsList(int connectionfd) {
+    struct Connection connection;
+    memset(&connection, 0, sizeof(struct Connection));
+    connection.connectionfd = connectionfd;
+    connection.ptm = -1;
+    connection.authentication = 0;
+    pthread_mutex_lock(&connectionsMutex);
+    for (int i = 0; i < sizeof(connections)/sizeof(connections[0]); i++) {
+        if (connections[i].connectionfd == 0) {
+            connections[i] = connection;
+        }
+    }
+    pthread_mutex_unlock(&connectionsMutex);
+}
+
+// Удаляем соединения из списка
+
+
 // Добавляем новое соединение в epoll
 int acceptConnection() {
     struct sockaddr addr;
@@ -152,6 +190,9 @@ int handleRequest(int connectionfd) {
     }
 }
 
+// Определяем тип дескриптора (connection, ptm или другой)
+
+
 // Обрабатываем событие
 void *handleEvent(void *args) {
     // Получаем аргументы в новом потоке
@@ -166,19 +207,14 @@ void *handleEvent(void *args) {
         popQueue(threadArgs->queue, &event);
         pthread_mutex_unlock(threadArgs->mutex);
 
-        printf("Starting handle event\nThread: %d\n", (int)pthread_self());
-        if ((event.events & EPOLLERR) || (event.events & EPOLLHUP)) {
-            fprintf(stderr, "Handle event error or event hangup\n");
-            close(event.data.fd);
-            continue;
-        }
+
+        printf("Starting handle event. Thread: %d\n", (int)pthread_self());
         if (event.data.fd == socketfd) {
-            if (acceptConnection() == -1) {
+            if (acceptConnection()) {
                 fprintf(stderr, "Error: accepting new connection");
                 continue;
             }
         } else {
-            handleRequest(event.data.fd);
         }
     }
 }
@@ -208,6 +244,9 @@ int main(int argc, char *argv[]) {
     // Порт - 2й параметр запуска
     char port[4];
     strcpy(port, argv[2]);
+
+    // Инициализация fdLists
+    memset(connections, 0, sizeof(connections));
 
     struct addrinfo* addresses = getAvailiableAddresses(port);
     if (!addresses) 
