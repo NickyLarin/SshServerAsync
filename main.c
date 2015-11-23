@@ -5,22 +5,17 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <sys/epoll.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
-#include <time.h>
 
 #include "common.h"
 #include "queue.h"
+#include "pass_pair.h"
 
 
 #define MAX_CONNECTIONS 256
-#define CONNECTION_TIMEOUT 10
-
-#define CONN_FD_TYPE 1
-#define PTM_FD_TYPE 2
-#define OTHER_FD_TYPE 3
+#define CONNECTION_TIMEOUT 300
 
 #define NOT_AUTHENTICATED 0
 #define LOGIN_REQUESTED 1
@@ -32,6 +27,7 @@ struct Connection {
     int connectionfd;
     int ptm;
     int authentication;  // 0 - Новое соединение 1 - Запрошен логин 2 - Логин проверен, запрошен пароль 3 - Пароль проверен
+    struct PassPair *pair;
     time_t lastRequest;
 };
 
@@ -48,6 +44,10 @@ volatile sig_atomic_t done = 0;
 // Глобальные переменные для струтуры со списком дескрипторов соединений и мьютексом для синхронизации доступа к ним
 struct Connection connections[MAX_CONNECTIONS];
 pthread_mutex_t connectionsMutex;
+
+// Глобальная переменная с парами логин-пароль;
+struct PassPair *passPairs;
+intmax_t lengthPassPairs;
 
 // Глобальные переменные дескрипторов socketfd и epoll
 int socketfd = -1;
@@ -138,6 +138,7 @@ void addConnectionIntoList(int connectionfd) {
     connection.ptm = -1;
     connection.authentication = 0;
     connection.lastRequest = time(NULL);
+    connection.pair = NULL;
     pthread_mutex_lock(&connectionsMutex);
     for (int i = 0; i < sizeof(connections)/sizeof(connections[0]); i++) {
         if (connections[i].connectionfd == 0) {
@@ -171,11 +172,11 @@ int acceptConnection() {
         return -1;
     }
     if (setNonBlock(connectionfd) == -1) {
-        fprintf(stderr, "Making connection descriptor %d non-block error", connectionfd);
+        fprintf(stderr, "Making connection descriptor %d non-block error\n", connectionfd);
         return -1;
     }
-    if (addToEpoll(epollfd, connectionfd) == -1) {
-        fprintf(stderr, "Adding connection to epoll");
+    if (addToEpoll(epollfd, connectionfd, EPOLLET | EPOLLIN) == -1) {
+        fprintf(stderr, "Adding connection to epoll\n");
         return -1;
     }
     addConnectionIntoList(connectionfd);
@@ -225,64 +226,91 @@ int checkAuthentication(struct Connection *connection) {
     return 0;
 }
 
+// Посылаем сообщение
+int sendMsg(int connectionfd, char *msg) {
+    intmax_t count = write(connectionfd, msg, strlen(msg));
+    if (count != strlen(msg)) {
+        return -1;
+    }
+    return 0;
+}
+
+// Получаем пару логин-пароль по логину
+struct PassPair *getPair(char *login, int size) {
+    printf("%s\n", login);
+    for (int i = 0; i < lengthPassPairs; i++) {
+        if (strncmp(passPairs[i].login, login, size) == 0) {
+            return &passPairs[i];
+        }
+    }
+    return NULL;
+}
+
+// Проверяем пароль
+int checkPassword(struct PassPair *pair, char *password) {
+    if (strncmp(pair->pass, password, strlen(pair->pass-1)) != 0) {
+        fprintf(stderr, "Wrong password for %s, Thread: %d\n", pair->login, pthread_self());
+        return -1;
+    }
+    return 0;
+}
+
 // Пройти аутентификацию
 int passAuthentication(struct Connection *connection) {
+    printf("Thread: %d get here with: %d auth: %d\n", pthread_self(), connection->connectionfd, connection->authentication);
     switch(connection->authentication) {
         case NOT_AUTHENTICATED: {
-            char message[] = "Login: ";
-            int count = write(connection->connectionfd, message, sizeof(message)/sizeof(char));
-            if (count < sizeof(message)/sizeof(char) && (errno & EAGAIN)) {
-                perror("writing to connectionfd");
+            if (sendMsg(connection->connectionfd, "Enter login: ") == -1) {
+                fprintf(stderr, "Error: sending login msg\n");
                 return -1;
             }
-            connection->authentication++;
+            connection->authentication = LOGIN_REQUESTED;
             break;
         }
         case LOGIN_REQUESTED: {
-            int size = 128;
-            char *buffer = malloc(size * sizeof(char));
-            int count = 0;
-            do {
-                count += read(connection->connectionfd, buffer, size);
-                if (count == size) {
-                    size *= 2;
-                    buffer = realloc(buffer, size * sizeof(char));
+            char *login = NULL;
+            int size = readNonBlock(connection->connectionfd, &login, 0);
+            connection->pair = getPair(login, size-1);  // -1 чтобы не сравнивать \0 или \r в конце строки
+            if (connection->pair == NULL) {
+                if(sendMsg(connection->connectionfd, "Wrong login, try again\n") == -1) {
+                    fprintf(stderr, "Error: sending wrong login msg\n");
+                    return -1;
                 }
-            } while (count > 0 && (errno & ~EAGAIN));
-            printf("SERVER RECEIVE LOGIN: %s\n", buffer);
-
-            free(buffer);
-            char message[] = "Password: ";
-            count = write(connection->connectionfd, message, sizeof(message)/sizeof(char));
-            if (count < sizeof(message)/sizeof(char) && (errno & EAGAIN)) {
-                perror("writing to connectionfd");
+                connection->authentication = NOT_AUTHENTICATED;
+                break;
+            }
+            free(login);
+            if (sendMsg(connection->connectionfd, "Enter password: ") == -1) {
+                fprintf(stderr, "Error: sending password msg\n");
                 return -1;
             }
-            connection->authentication++;
+            connection->authentication = PASSWORD_REQUESTED;
             break;
         }
         case PASSWORD_REQUESTED: {
-            int size = 128;
-            char *buffer = malloc(size * sizeof(char));
-            int count = 0;
-            do {
-                count += read(connection->connectionfd, buffer, size);
-                if (count == size) {
-                    size *= 2;
-                    buffer = realloc(buffer, size * sizeof(char));
+            char *password = NULL;
+            int size = readNonBlock(connection->connectionfd, &password, 0);
+            if (checkPassword(connection->pair, password) == -1) {
+                if (sendMsg(connection->connectionfd, "Wrong password, try again\n") == -1) {
+                    fprintf(stderr, "Error: sending wrong password msg\n");
+                    return -1;
                 }
-            } while (count > 0 && (errno & ~EAGAIN));
-            printf("SERVER RECEIVE PASS: %s\n", buffer);
-            free(buffer);
+                connection->authentication = LOGIN_REQUESTED;
+                break;
+            }
+            free(password);
+            intmax_t count = 0;
             char message[] = "Authentication proceeded!\n";
             count = write(connection->connectionfd, message, sizeof(message)/sizeof(char));
             if (count < sizeof(message)/sizeof(char) && (errno & EAGAIN)) {
                 perror("writing to connectionfd");
                 return -1;
             }
-            connection->authentication++;
+            connection->authentication = AUTHENTICATED;
             break;
         }
+        default:
+            break;
     }
 }
 
@@ -306,9 +334,6 @@ int handleEvent(int fd) {
     }
 }
 
-// Определяем тип дескриптора (connection, ptm или другой)
-
-
 // Обрабатываем событие
 void *worker(void *args) {
     // Получаем аргументы в новом потоке
@@ -321,9 +346,8 @@ void *worker(void *args) {
         }
         struct epoll_event event;
         popQueue(workerArgs->queue, &event);
+        //printf("Got event: %d thread: %d\n", event.data.fd, pthread_self());
         pthread_mutex_unlock(workerArgs->mutex);
-
-
         //printf("Starting handle event. Thread: %d\n", (int)pthread_self());
         if (event.data.fd == socketfd) {
             if (acceptConnection() == -1) {
@@ -338,6 +362,30 @@ void *worker(void *args) {
     }
 }
 
+// Читаем пароли из файла
+int readPasswordsFromFile(char *path) {
+    struct PassPair *passwords;
+    int size = 8;
+    passwords = (struct PassPair *)malloc(size * sizeof(struct PassPair));
+    FILE *ptr;
+    ptr = fopen(path, "r");
+    intmax_t count;
+    size_t length = 0;
+    do {
+        count = fread(passwords, sizeof(struct PassPair), 1, ptr);
+        length += count;
+        if (size == length) {
+            size *= 2;
+            passwords = (struct PassPair *)realloc(passwords, size * sizeof(struct PassPair));
+        }
+    } while (count == sizeof(struct PassPair));
+    passPairs = (struct PassPair *)malloc(length * sizeof(struct PassPair));
+    memcpy(passPairs, passwords, length * sizeof(struct PassPair));
+    lengthPassPairs = length;
+    free(passwords);
+    fclose(ptr);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 //
 // MAIN
@@ -350,9 +398,8 @@ int main(int argc, char *argv[]) {
     act.sa_handler = handleSigInt;
     sigaction(SIGINT, &act, 0);
 
-
     // Проверка количества аргументов
-    if (argc < 3) {
+    if (argc < 4) {
         fprintf(stderr, "Too few arguments\n");
         exit(EXIT_FAILURE);
     }
@@ -364,7 +411,10 @@ int main(int argc, char *argv[]) {
     char port[4];
     strcpy(port, argv[2]);
 
-    // Инициализация fdLists
+    // Путь к файлу с паролями - 3й параметр запуска
+    readPasswordsFromFile(argv[3]);
+
+    // Инициализация connections
     memset(connections, 0, sizeof(connections));
 
     struct addrinfo* addresses = getAvailiableAddresses(port);
@@ -385,11 +435,16 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-
     // Создаём потоки
     pthread_t workers[numberOfWorkers];
-    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-    pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
+    pthread_mutex_t mutex;
+    pthread_mutexattr_t mutexattr;
+    pthread_mutexattr_init(&mutexattr);
+    pthread_mutexattr_settype(&mutexattr, PTHREAD_MUTEX_ERRORCHECK);
+    pthread_mutex_init(&mutex, &mutexattr);
+    pthread_mutex_init(&connectionsMutex, &mutexattr);
+    pthread_cond_t condition;
+    pthread_cond_init(&condition, NULL);
 
     // Создаём очередь
     struct Queue queue;
@@ -412,7 +467,7 @@ int main(int argc, char *argv[]) {
     setEpollFd(_epollfd);
 
     // Добавляем сокет в epoll
-    if (addToEpoll(epollfd, socketfd) == -1)
+    if (addToEpoll(epollfd, socketfd, EPOLLET | EPOLLIN) == -1)
         exit(EXIT_FAILURE);
 
     int maxEventNum = numberOfWorkers;
@@ -421,12 +476,10 @@ int main(int argc, char *argv[]) {
     int timeout = -1;
     printf("Main thread: %d\n", (int)pthread_self());
     while(!done) {
-        printf("Start waiting for epoll events\n");
         int eventsNumber = epoll_wait(epollfd, events, maxEventNum, timeout);
         if (!eventsNumber)
             printf("No events\n");
         for (int i = 0; i < eventsNumber; i++) {
-            printf("Handling event %d of %d\n", i + 1, eventsNumber);
             pthread_mutex_lock(&mutex);
             pushQueue(&queue, &events[i]);
             pthread_cond_signal(&condition);
@@ -434,6 +487,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // Освобождение ресурсов
+    pthread_mutex_destroy(&connectionsMutex);
+    pthread_mutex_destroy(&mutex);
+    pthread_mutexattr_destroy(&mutexattr);
+    free(passPairs);
     destroyQueue(&queue);
     close(socketfd);
     close(epollfd);

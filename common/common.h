@@ -4,8 +4,9 @@
 
 #ifndef COMMON_H
     int setNonBlock(int fd);
-    int addToEpoll(int epollfd, int fd);
+    int addToEpoll(int epollfd, int fd, uint32_t flags);
+    int changeEpoll(int epollfd, int fd, uint32_t flags);
     int writeNonBlock(int fd, char *string);
-    int readNonBlock(int fd, char *string);
+    int readNonBlock(int fd, char **buffer, size_t beginSize);
     #define COMMON_H
 #endif //COMMON_H

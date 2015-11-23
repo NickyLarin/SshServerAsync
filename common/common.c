@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "common.h"
 
@@ -24,12 +25,26 @@ int setNonBlock(int fd) {
 }
 
 // Добавляем дескриптор в epoll
-int addToEpoll(int epollfd, int fd) {
+int addToEpoll(int epollfd, int fd, uint32_t flags) {
     struct epoll_event event;
+    memset(&event, 0, sizeof(struct epoll_event));
     event.data.fd = fd;
-    event.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET;
+    event.events = flags;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event) == -1) {
         perror("adding fd to epoll error\n");
+        return -1;
+    }
+    return 0;
+}
+
+// Изменяем дескриптор в epoll
+int changeEpoll(int epollfd, int fd, uint32_t flags) {
+    struct epoll_event event;
+    memset(&event, 0, sizeof(struct epoll_event));
+    event.data.fd = fd;
+    event.events = flags;
+    if (epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event) == -1) {
+        perror("moddin fd in epoll error\n");
         return -1;
     }
     return 0;
@@ -46,17 +61,41 @@ int writeNonBlock(int fd, char *string) {
 }
 
 // Чтение из неблокирующегося дескриптора
-int readNonBlock(int fd, char *string) {
-    int size = READ_BUFFER_SIZE;
-    char *buffer = (char *)malloc(size * sizeof(char));
-    int count = 0;
+int readNonBlock(int fd, char **buffer, size_t beginSize) {
+    size_t size = beginSize;
+    if (size < 1)
+        size = READ_BUFFER_SIZE;
+    if (*buffer == NULL) {
+        *buffer = (char *)malloc(size * sizeof(char));
+    }
+    intmax_t count = 0;
+    int legth = 0;
     do {
-        count = read(fd, buffer, READ_BUFFER_SIZE);
-        if (count + READ_BUFFER_SIZE <= size) {
-            size *= 4;
-            buffer = (char *) realloc(buffer, size * sizeof(char));
+        count = read(fd, ((*buffer) + legth), READ_BUFFER_SIZE);
+        legth += count;
+        if (legth == size) {
+            size *= 2;
+            *buffer = realloc(*buffer, size * sizeof(char));
         }
-    } while (count != 0 && (errno & EAGAIN));
-    string = buffer;
-    return 0;
+    } while (count > 0);
+    switch(count) {
+        case -1: {
+            if (errno != EAGAIN) {
+                perror("reading non-block error");
+                return -1;
+            }
+            break;
+        }
+        case 0: {
+            printf("Connection have been closed");
+        }
+        default:
+            break;
+    }
+    if ((*buffer)[strlen(*buffer)-1] == '\n') {
+        (*buffer)[strlen(*buffer)-1] = '\0';
+        size = strlen(*buffer);
+        *buffer = (char *)realloc(*buffer, size * sizeof(char));
+    }
+    return size;
 }

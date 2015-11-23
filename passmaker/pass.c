@@ -23,6 +23,10 @@ int main(int argc, char *argv[]) {
     act.sa_handler = handleSigInt;
     sigaction(SIGINT, &act, 0);
 
+    if (argc < 4) {
+        fprintf(stderr, "Too few arguments\n");
+        exit(EXIT_FAILURE);
+    }
     // Получаем имя файла и режим работы из параметров 
     char filename[MAX_FILENAME_LEN];
     char mode[3];
