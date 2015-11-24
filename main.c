@@ -1,3 +1,5 @@
+#define _XOPEN_SOURCE 600
+#define _BSD_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +10,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <sys/ioctl.h>
 
 #include "common.h"
 #include "queue.h"
@@ -241,7 +246,6 @@ int sendMsg(int connectionfd, char *msg) {
 struct PassPair *getPair(char *login) {
     char *result = cleanString(login);
     for (int i = 0; i < lengthPassPairs; i++) {
-        printf("Login in file: %s\n", passPairs[i].login);
         if (strncmp(passPairs[i].login, result, strlen(passPairs[i].login)) == 0) {
             return &passPairs[i];
         }
@@ -320,6 +324,86 @@ int passAuthentication(struct Connection *connection) {
     }
 }
 
+int createPty(struct Connection *connection) {
+    int ptm, pts;
+    ptm = posix_openpt(O_RDWR);
+    if (ptm == -1) {
+        perror("creating new plm");
+        return -1;
+    }
+    if (grantpt(ptm) == -1) {
+        perror("granting pt access");
+        return -1;
+    }
+    if (unlockpt(ptm) == -1) {
+        perror("unlocking pt");
+        return -1;
+    }
+    pts = open(ptsname(ptm), O_RDWR);
+    if (pts == -1) {
+        perror("opening pts");
+        return -1;
+    }
+    if (setNonBlock(ptm) == -1) {
+        fprintf(stderr, "Error: making ptm non-block\n");
+        return -1;
+    }
+    if (setNonBlock(pts) == -1) {
+        fprintf(stderr, "Error: making pts non-block\n");
+        return -1;
+    }
+    connection->ptm = ptm;
+
+    if (fork()) {
+        if (close(pts) == -1) {
+            perror("closing pts in parent process");
+            return -1;
+        }
+        if (addToEpoll(epollfd, ptm, EPOLLET | EPOLLIN) == -1) {
+            fprintf(stderr, "Error: adding ptm to epoll\n");
+            return -1;
+        }
+    } else {
+        if (close(ptm) == -1) {
+            perror("closing ptm in child process");
+            return -1;
+        }
+        struct termios oldSettings, newSettings;
+        if (tcgetattr(pts, &oldSettings) == -1) {
+            perror("getting old terminal settings\n");
+            return -1;
+        }
+        newSettings = oldSettings;
+        cfmakeraw(&newSettings);
+        if (tcsetattr(pts, TCSANOW, &newSettings) == -1) {
+            perror("setting new terminal settings\n");
+            return -1;
+        }
+        close(0);
+        close(1);
+        close(2);
+
+        dup(pts);
+        dup(pts);
+        dup(pts);
+
+        close(pts);
+
+        ioctl(0, TIOCSCTTY, 1);
+        execvp("/bin/bash", "");
+        return 0;
+    }
+}
+
+int workWithPty(struct Connection *connection) {
+    if (connection->ptm == -1) {
+        if (createPty(connection) == -1) {
+            fprintf(stderr, "Error: creating new pty\n");
+            return -1;
+        }
+    }
+}
+
 // Обрабатываем новое сообщение
 int handleEvent(int fd) {
     struct Connection *connection = getConnection(fd);
@@ -336,7 +420,7 @@ int handleEvent(int fd) {
     if (checkAuthentication(connection)) {
         passAuthentication(connection);
     } else {
-
+        workWithPty(connection);
     }
 }
 
