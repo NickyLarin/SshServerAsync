@@ -1,5 +1,7 @@
 #define _XOPEN_SOURCE 600
 #define _BSD_SOURCE
+#include <unistd.h>
+#include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +24,7 @@
 #define MAX_CONNECTIONS 256
 #define CONNECTION_TIMEOUT 300
 #define MAX_PASSWORD_ATTEMPTS 5
+#define TIMEOUT_WATCHER_FREQUENCY 15
 
 #define LOGIN_REQUEST 0
 #define LOGIN_CHECK 1
@@ -31,7 +34,7 @@
 
 // Структура содержащая информацию об аутентификации
 struct Authentication {
-    int status;  // 0 - Новое соединение 1 - Запрошен логин 2 - Логин проверен, запрошен пароль 3 - Пароль проверен
+    int status;  // 0 - Запрос логина 1 - Проверка логина 2 - Запрос пароля 3 - Проверка пароля 4 - Аутентифицирован
     int attempts;
 };
 
@@ -215,6 +218,11 @@ int closeConnection(struct Connection *connection) {
 // Возвращаем 1, если таймаут наступил
 int checkConnectionTimeout(struct Connection *connection) {
     if (difftime(time(NULL), connection->lastRequest) > CONNECTION_TIMEOUT) {
+        fprintf(stderr, "Connection %d closed on timeout\n", connection->connectionfd);
+        if (closeConnection(connection) == -1) {
+            fprintf(stderr, "Error: closing connection on timeout\n");
+            return -1;
+        }
         return 1;
     } else {
         connection->lastRequest = time(NULL);
@@ -460,10 +468,7 @@ int handleEvent(int fd) {
         return -1;
     }
     if (checkConnectionTimeout(connection) == 1) {
-        if (closeConnection(connection) == -1) {
-            fprintf(stderr, "Error: closing connection for timeout\n");
-            return -1;
-        }
+        return 0;
     }
     if (checkAuthentication(connection) > 0) {
         passAuthentication(connection);
@@ -536,6 +541,20 @@ int readPasswordsFromFile(char *path) {
     return 0;
 }
 
+void *watchTimeout(void) {
+    while (!done) {
+        sleep(TIMEOUT_WATCHER_FREQUENCY);
+        pthread_mutex_lock(&connectionsMutex);
+        for (int i = 0; i < sizeof(connections)/sizeof(connections[0]); i++) {
+            if (connections[i].connectionfd != 0) {
+                checkConnectionTimeout(&connections[i]);
+            }
+        }
+        pthread_mutex_unlock(&connectionsMutex);
+    }
+    return NULL;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 //
 // MAIN
@@ -596,6 +615,10 @@ int main(int argc, char *argv[]) {
     pthread_cond_t condition;
     pthread_cond_init(&condition, NULL);
 
+    // Создаём отдельный поток для отслеживания таймаута соединений
+    pthread_t timeoutWatcher;
+    pthread_create(&timeoutWatcher, NULL, watchTimeout, NULL);
+
     // Создаём очередь
     struct Queue queue;
     initQueue(&queue, sizeof(struct epoll_event));
@@ -646,6 +669,5 @@ int main(int argc, char *argv[]) {
     close(socketfd);
     close(epollfd);
     printf("DONE!!!");
-
     return 0;
 }
