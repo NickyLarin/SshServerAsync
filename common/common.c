@@ -31,7 +31,7 @@ int addToEpoll(int epollfd, int fd, uint32_t flags) {
     event.data.fd = fd;
     event.events = flags;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event) == -1) {
-        perror("adding fd to epoll error\n");
+        perror("adding fd to epoll error");
         return -1;
     }
     return 0;
@@ -61,7 +61,7 @@ int writeNonBlock(int fd, char *string) {
 }
 
 // Чтение из неблокирующегося дескриптора
-int readNonBlock(int fd, char **buffer, size_t beginSize) {
+ssize_t readNonBlock(int fd, char **buffer, size_t beginSize) {
     size_t size = beginSize;
     if (size < 1)
         size = READ_BUFFER_SIZE;
