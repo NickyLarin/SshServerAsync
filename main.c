@@ -21,7 +21,7 @@
 
 #define MAX_CONNECTIONS 256
 #define CONNECTION_TIMEOUT 300
-//#define MAX_LOGIN_ATTEMPTS 3
+#define MAX_PASSWORD_ATTEMPTS 5
 
 #define LOGIN_REQUEST 0
 #define LOGIN_CHECK 1
@@ -29,11 +29,17 @@
 #define PASSWORD_CHECK 3
 #define AUTHENTICATED 4
 
+// Структура содержащая информацию об аутентификации
+struct Authentication {
+    int status;  // 0 - Новое соединение 1 - Запрошен логин 2 - Логин проверен, запрошен пароль 3 - Пароль проверен
+    int attempts;
+};
+
 // Структура содержащая информацию о соединении
 struct Connection {
     int connectionfd;
     int ptm;
-    int authentication;  // 0 - Новое соединение 1 - Запрошен логин 2 - Логин проверен, запрошен пароль 3 - Пароль проверен
+    struct Authentication auth;
     struct PassPair *pair;
     time_t lastRequest;
 };
@@ -143,7 +149,9 @@ void addConnectionIntoList(int connectionfd) {
     memset(&connection, 0, sizeof(struct Connection));
     connection.connectionfd = connectionfd;
     connection.ptm = -1;
-    connection.authentication = 0;
+    struct Authentication auth;
+    memset(&auth, 0, sizeof(struct Authentication));
+    connection.auth = auth;
     connection.lastRequest = time(NULL);
     connection.pair = NULL;
     pthread_mutex_lock(&connectionsMutex);
@@ -187,7 +195,6 @@ int acceptConnection() {
         return -1;
     }
     addConnectionIntoList(connectionfd);
-    printf("new connectionfd: %d\n", connectionfd);
     return connectionfd;
 }
 
@@ -229,7 +236,7 @@ struct Connection *getConnection(int fd) {
 
 // Проверяем аутентификацию
 int checkAuthentication(struct Connection *connection) {
-    if (connection->authentication < AUTHENTICATED) {
+    if (connection->auth.status < AUTHENTICATED) {
         return 1;
     }
     return 0;
@@ -272,7 +279,17 @@ int requestLogin(struct Connection *connection) {
         fprintf(stderr, "Error: sending login msg\n");
         return -1;
     }
-    connection->authentication = LOGIN_CHECK;
+    connection->auth.status = LOGIN_CHECK;
+    return 0;
+}
+
+// Запрашиваем пароль
+int requestPassword(struct Connection *connection) {
+    if (sendMsg(connection->connectionfd, "Enter password: ") == -1) {
+        fprintf(stderr, "Error: sending password msg\n");
+        return -1;
+    }
+    connection->auth.status = PASSWORD_CHECK;
     return 0;
 }
 
@@ -291,20 +308,10 @@ int checkLogin(struct Connection *connection) {
         }
         requestLogin(connection);
     } else {
-        connection->authentication = PASSWORD_REQUEST;
+        connection->auth.status = PASSWORD_REQUEST;
         requestPassword(connection);
     }
     free(login);
-    return 0;
-}
-
-// Запрашиваем пароль
-int requestPassword(struct Connection *connection) {
-    if (sendMsg(connection->connectionfd, "Enter password: ") == -1) {
-        fprintf(stderr, "Error: sending password msg\n");
-        return -1;
-    }
-    connection->authentication = PASSWORD_CHECK;
     return 0;
 }
 
@@ -316,17 +323,27 @@ int checkPassword(struct Connection *connection) {
         return -1;
     }
     if (verifyPassword(connection->pair, password) == -1) {
-        if (sendMsg(connection->connectionfd, "Wrong password, try again\n") == -1) {
+        if (connection->auth.attempts == MAX_PASSWORD_ATTEMPTS) {
+            fprintf(stderr, "Many password enter attempts for user: %s\n", connection->pair->login);
+            if (sendMsg(connection->connectionfd, "Too many password enter attempts\n") == -1) {
+                fprintf(stderr, "Error: sending wrong too many attempts msg\n");
+                return -1;
+            }
+            closeConnection(connection);
+            return -1;
+        }
+        if (sendMsg(connection->connectionfd, "Wrong password, try again\n\n") == -1) {
             fprintf(stderr, "Error: sending wrong password msg\n");
             return -1;
         }
+        connection->auth.attempts++;
         requestPassword(connection);
     } else {
         if (sendMsg(connection->connectionfd, "Authentication complete!\n") == -1) {
             fprintf(stderr, "Error: sending password msg\n");
             return -1;
         }
-        connection->authentication = AUTHENTICATED;
+        connection->auth.status = AUTHENTICATED;
     }
     free(password);
     return 0;
@@ -334,7 +351,7 @@ int checkPassword(struct Connection *connection) {
 
 // Пройти аутентификацию
 int passAuthentication(struct Connection *connection) {
-    switch (connection->authentication) {
+    switch (connection->auth.status) {
         case LOGIN_REQUEST:
             requestLogin(connection);
             break;
@@ -448,7 +465,7 @@ int handleEvent(int fd) {
             return -1;
         }
     }
-    if (checkAuthentication(connection)) {
+    if (checkAuthentication(connection) > 0) {
         passAuthentication(connection);
     } else {
         workWithPty(connection);
@@ -608,7 +625,6 @@ int main(int argc, char *argv[]) {
 
     int timeout = -1;
     printf("Main thread: %d\n", (int)pthread_self());
-    printf("socketfd: %d\n", socketfd);
     while(!done) {
         int eventsNumber = epoll_wait(epollfd, events, maxEventNum, timeout);
         if (!eventsNumber)
