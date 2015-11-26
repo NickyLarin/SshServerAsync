@@ -13,6 +13,7 @@
 
 #define WRITE_BUFFER_SIZE 8
 #define READ_BUFFER_SIZE 8
+#define BUFFER_SIZE 1024
 
 // Делаем дескриптор не блокирующимся
 int setNonBlock(int fd) {
@@ -121,4 +122,24 @@ char *cleanString(char *string) {
     length-=count;
     tmp[length] = '\0';
     return tmp;
+}
+
+// Послать сообщение
+int sendMessage(int dest, int source) {
+    char buffer[BUFFER_SIZE];
+    ssize_t readCount = read(source, buffer, BUFFER_SIZE);
+    ssize_t writeCount;
+    while (readCount > -1) {
+        writeCount = write(dest, buffer, (size_t) readCount);
+        readCount = read(source, buffer, BUFFER_SIZE);
+    }
+    if (readCount == -1 && errno != EAGAIN) {
+        perror("reading message from fd");
+        return -1;
+    }
+    if (writeCount == -1 && errno != EAGAIN) {
+        perror("writing message to fd");
+        return -1;
+    }
+    return 0;
 }

@@ -251,8 +251,8 @@ int checkAuthentication(struct Connection *connection) {
 }
 
 // Посылаем сообщение
-int sendMsg(int connectionfd, char *msg) {
-    intmax_t count = write(connectionfd, msg, strlen(msg));
+int sendMsg(int fd, char *msg) {
+    intmax_t count = write(fd, msg, strlen(msg));
     if (count != strlen(msg)) {
         return -1;
     }
@@ -407,15 +407,16 @@ int createPty(struct Connection *connection) {
         fprintf(stderr, "Error: making pts non-block\n");
         return -1;
     }
+
     connection->ptm = ptm;
+    if (addToEpoll(epollfd, ptm, EPOLLET | EPOLLIN) == -1) {
+        fprintf(stderr, "Error: adding ptm to epoll\n");
+        return -1;
+    }
 
     if (fork()) {
         if (close(pts) == -1) {
             perror("closing pts in parent process");
-            return -1;
-        }
-        if (addToEpoll(epollfd, ptm, EPOLLET | EPOLLIN) == -1) {
-            fprintf(stderr, "Error: adding ptm to epoll\n");
             return -1;
         }
     } else {
@@ -444,18 +445,10 @@ int createPty(struct Connection *connection) {
 
         close(pts);
 
+        setsid();
+
         ioctl(0, TIOCSCTTY, 1);
         execvp("/bin/bash", NULL);
-    }
-    return 0;
-}
-
-int workWithPty(struct Connection *connection) {
-    if (connection->ptm == -1) {
-        if (createPty(connection) == -1) {
-            fprintf(stderr, "Error: creating new pty\n");
-            return -1;
-        }
     }
     return 0;
 }
@@ -473,7 +466,17 @@ int handleEvent(int fd) {
     if (checkAuthentication(connection) > 0) {
         passAuthentication(connection);
     } else {
-        workWithPty(connection);
+        if (connection->ptm == -1) {
+            if (createPty(connection) == -1) {
+                fprintf(stderr, "Error: creating new pty\n");
+                return -1;
+            }
+        }
+        if (fd == connection->connectionfd) {
+            sendMessage(connection->ptm, connection->connectionfd);
+        } else {
+            sendMessage(connection->connectionfd, connection->ptm);
+        }
     }
     return 0;
 }
@@ -497,7 +500,6 @@ void *worker(void *args) {
                 fprintf(stderr, "Error: accepting new connection\n");
                 continue;
             }
-
             if (handleEvent(connectionfd) == -1) {
                 fprintf(stderr, "Error: handling event\n");
                 continue;
@@ -541,7 +543,7 @@ int readPasswordsFromFile(char *path) {
     return 0;
 }
 
-void *watchTimeout(void) {
+void *watchTimeout(void *args) {
     while (!done) {
         sleep(TIMEOUT_WATCHER_FREQUENCY);
         pthread_mutex_lock(&connectionsMutex);

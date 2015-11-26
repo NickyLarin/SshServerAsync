@@ -9,5 +9,6 @@
     int writeNonBlock(int fd, char *string);
     ssize_t readNonBlock(int fd, char **buffer, size_t beginSize);
     char *cleanString(char *string);
+    int sendMessage(int dest, int source);
     #define COMMON_H
 #endif //COMMON_H
